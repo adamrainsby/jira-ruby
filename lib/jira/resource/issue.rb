@@ -62,25 +62,29 @@ module JIRA
       # @param client [JIRA::Client]
       # @return [Array<JIRA::Resource::Issue>]
       def self.all(client)
-        start_at = 0
         max_results = 1000
         result = []
+        next_page_token = nil
         loop do
+          jql = 'key IS NOT EMPTY'
           url = client.options[:rest_base_path] +
-                "/search/jql?expand=transitions.fields&maxResults=#{max_results}&startAt=#{start_at}"
+              "/search/jql?jql=#{CGI.escape(jql)}&expand=transitions.fields&maxResults=#{max_results}"
+          url << "&nextPageToken=#{next_page_token}" if next_page_token
+
           response = client.get(url)
           json = parse_json(response.body)
           json['issues'].map do |issue|
             result.push(client.Issue.build(issue))
           end
-          break if json['issues'].empty?
 
-          start_at += json['issues'].size
+          break if json['isLast']
+
+          next_page_token = json['nextPageToken']
         end
         result
       end
 
-      def self.jql(client, jql, options = { fields: nil, start_at: nil, max_results: nil, expand: nil, validate_query: true })
+      def self.jql(client, jql, options = { fields: nil, next_page_token: nil, max_results: nil, expand: nil })
         url = client.options[:rest_base_path] + "/search/jql?jql=#{CGI.escape(jql)}"
 
         if options[:fields]
@@ -88,9 +92,10 @@ module JIRA
                               CGI.escape(client.Field.name_to_id(value))
                             end.join(',')}"
         end
-        url << "&startAt=#{CGI.escape(options[:start_at].to_s)}" if options[:start_at]
         url << "&maxResults=#{CGI.escape(options[:max_results].to_s)}" if options[:max_results]
-        url << '&validateQuery=false' if options[:validate_query] === false # rubocop:disable Style/CaseEquality
+        url << "&nextPageToken=#{CGI.escape(options[:next_page_token].to_s)}" if options[:next_page_token]
+        fields = options[:fields] || ['all']
+        url << "&fields=#{fields.map { |value| CGI.escape(value.to_s) }.join(',')}"
 
         if options[:expand]
           options[:expand] = [options[:expand]] if options[:expand].is_a?(String)
@@ -99,11 +104,16 @@ module JIRA
 
         response = client.get(url)
         json = parse_json(response.body)
+        next_page_token = json['nextPageToken']
         return json['total'] if options[:max_results]&.zero?
 
-        json['issues'].map do |issue|
-          client.Issue.build(issue)
-        end
+        {
+          issues: json['issues'].map do |issue|
+            client.Issue.build(issue)
+          end,
+          next_page_token: next_page_token,
+          is_last: json['isLast']
+        }
       end
 
       # Fetches the attributes for the specified resource from JIRA unless
